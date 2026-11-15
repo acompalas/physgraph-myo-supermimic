@@ -549,6 +549,8 @@ class MyoHandPourEnv:
         # matching PhysGraph's own per-modality concatenated-tensor
         # convention -- see _compute_obs() for the full rationale
         self._obs_act = os.environ.get("MYOHAND_OBS_ACT", "0") == "1"
+        self._obs_pad = os.environ.get("MYOHAND_OBS_PAD", "0") == "1"  # 15 = 5 pads x (target - current), appended AFTER act
+        assert not self._obs_pad or self.demo_pad_pos is not None, "MYOHAND_OBS_PAD=1 needs MYOHAND_PADPOS_W>0 and the v2pad pkl"
         self._na = int(self.mj_model.na)
         rh_proprio_dim = 23 * 3 + 13   # dof_pos/cos/sin + wrist pos/quat/vel/angvel
         if self._obs_act:
@@ -558,7 +560,7 @@ class MyoHandPourEnv:
         # wrist(23) + joints(180=60*3) + obj(23) + obj_to_joints(21) + gt_tips(5) + bps(128)
         rh_target_dim = 23 + 180 + 23 + 21 + 5 + 128  # = 380
         self.observation_space = gym.spaces.Dict({
-            "proprioception": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_proprio_dim * 2 + (self._na if self._obs_act else 0),), dtype=np.float32),
+            "proprioception": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_proprio_dim * 2 + (self._na if self._obs_act else 0) + (15 if self._obs_pad else 0),), dtype=np.float32),
             "privileged": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_privileged_dim * 2,), dtype=np.float32),
             "target": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_target_dim * 2,), dtype=np.float32),
         })  # lib/rl/base.py's play_steps unconditionally does
@@ -840,6 +842,18 @@ class MyoHandPourEnv:
         proprioception = torch.cat([rh_proprio, lh_proprio], dim=-1)
         if self._obs_act:
             proprioception = torch.cat([proprioception, wp.to_torch(self.data.act).clone()], dim=-1)
+        if self._obs_pad:
+            if not hasattr(self, "_pad_body_ids_t"):
+                self._pad_body_ids_t = torch.as_tensor(
+                    [mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, _pn) for _pn in self._pad_body_names],
+                    device=self.device, dtype=torch.long)
+            _pq = wp.to_torch(self.data.xquat)[:, self._pad_body_ids_t]
+            _pb = wp.to_torch(self.data.xpos)[:, self._pad_body_ids_t, :]
+            _pv = self._pad_local[None].expand(_pb.shape[0], -1, -1)
+            _qw, _qu = _pq[..., :1], _pq[..., 1:]
+            _pt = torch.cross(_qu, _pv, dim=-1)
+            _pad_w = _pb + _pv + 2.0 * (_qw * _pt + torch.cross(_qu, _pt, dim=-1))
+            proprioception = torch.cat([proprioception, (self.demo_pad_pos[idx] - _pad_w).reshape(_pb.shape[0], -1)], dim=-1)
         privileged = torch.cat([rh_privileged, lh_privileged], dim=-1)
         target = torch.cat([rh_target, lh_target], dim=-1)
 
