@@ -303,13 +303,15 @@ class MyoHandPourEnv:
             self.mj_model.jnt_range[_j, 1] = np.radians(_mp_max)
             print(f"[limits] mp_flexion_r upper limit set to {_mp_max} deg")
         _tl = os.environ.get("MYOHAND_THUMB_LIMITS", "0")
-        if _tl in ("1", "2"):
+        if _tl in ("1", "2", "3"):
             _tl_v1 = {"cmc_flexion_r": (2, 36), "cmc_abduction_r": (-7, 33), "mp_flexion_r": (-1, 32), "ip_flexion_r": (-28, 14)}
             _tl_v2 = {"cmc_flexion_r": (-12, 35), "cmc_abduction_r": (13, 44), "mp_flexion_r": (-9, 30), "ip_flexion_r": (-51, 14)}
-            for _n, (_lo, _hi) in (_tl_v2 if _tl == "2" else _tl_v1).items():
+            # mode 3 = mode 2 with ip lower bound -42 (demo min -40.6) and cmc_abduction upper 46 (demo max 44.4)
+            _tl_v3 = dict(_tl_v2, ip_flexion_r=(-42, 14), cmc_abduction_r=(13, 46))
+            for _n, (_lo, _hi) in {"1": _tl_v1, "2": _tl_v2, "3": _tl_v3}[_tl].items():
                 _j = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, _n)
                 self.mj_model.jnt_range[_j] = np.radians([_lo, _hi])
-            print("[limits] thumb ranges tightened to demo range +-10 deg")
+            print(f"[limits] thumb ranges mode {_tl} applied")
         self.model = mjw.put_model(self.mj_model)
         self.data = mjw.make_data(
             self.mj_model, nworld=num_envs, nconmax=max(num_envs * 100, 5000), njmax=max(num_envs * 4, 5000),
