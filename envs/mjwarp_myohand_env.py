@@ -292,6 +292,13 @@ class MyoHandPourEnv:
             assert _j >= 0, _n
             self.mj_model.jnt_range[_j, 1] = np.radians(float(_v))
             print(f"[limits] {_n.strip()} upper limit set to {float(_v)} deg")
+        _jmin = os.environ.get("MYOHAND_JOINT_MIN_DEG", "")
+        for _item in [x for x in _jmin.split(",") if x.strip()]:
+            _n, _v = _item.split(":")
+            _j = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, _n.strip())
+            assert _j >= 0, _n
+            self.mj_model.jnt_range[_j, 0] = np.radians(float(_v))
+            print(f"[limits] {_n.strip()} lower limit set to {float(_v)} deg")
         _ip_flex = float(os.environ.get("MYOHAND_IP_MAX_FLEX_DEG", "0"))
         if _ip_flex > 0:
             _j = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, "ip_flexion_r")
