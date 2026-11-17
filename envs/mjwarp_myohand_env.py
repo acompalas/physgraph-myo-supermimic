@@ -1101,6 +1101,11 @@ class MyoHandPourEnv:
                     _hi[i] = float(_m.jnt_range[j, 1])
             self._jq_M = _M / _M.sum(0, keepdim=True).clamp(min=1.0)
             self._jq_dz = _dz
+            _gm_hi = {"cmc_flexion_r", "cmc_abduction_r", "mp_flexion_r", "ip_flexion_r",
+                      "mcp4_flexion_r", "mcp4_abduction_r", "pm4_flexion_r", "md4_flexion_r"}
+            _gm_mult = float(os.environ.get("MYOHAND_JQ_THUMB_RING_MULT", "2.0"))
+            _gm_w = torch.tensor([_gm_mult if n in _gm_hi else 1.0 for n in _names], device=self.device, dtype=torch.float32)
+            self._jq_gwvec = _gm_w / _gm_w.sum()
             self._lim_lo, self._lim_hi = _lo, _hi
             self._jq_gw = torch.tensor(
                 [float(os.environ.get("MYOHAND_JQ_W_WRIST", "0.3")), float(os.environ.get("MYOHAND_JQ_W_THUMB", "1.0"))]
@@ -1113,7 +1118,13 @@ class MyoHandPourEnv:
         _q_tgt = self.demo_opt_dof_pos[torch.clamp(cur_idx, max=self.demo_opt_dof_pos.shape[0] - 1)]
         _jq_excess = torch.clamp((_q_cur - _q_tgt).abs() - self._jq_dz, min=0.0)
         _jq_e = _jq_excess @ self._jq_M
-        reward_joint_q = ((0.5 * torch.exp(-_jq_lam * _jq_e) + 0.5 * torch.exp(-_jq_lamw * _jq_e)) * self._jq_gw).sum(-1)
+        if os.environ.get("MYOHAND_JQ_MODE", "") == "g":
+            # run G form: one exp term, weighted-mean excess over a uniform deadzone, thumb+ring joints x2
+            _gdz = np.radians(float(os.environ.get("MYOHAND_JQ_DEADZONE_DEG", "6.0")))
+            _gex = torch.clamp((_q_cur - _q_tgt).abs() - _gdz, min=0.0)
+            reward_joint_q = torch.exp(-_jq_lam * (_gex * self._jq_gwvec).sum(-1))
+        else:
+            reward_joint_q = ((0.5 * torch.exp(-_jq_lam * _jq_e) + 0.5 * torch.exp(-_jq_lamw * _jq_e)) * self._jq_gw).sum(-1)
         _over = torch.clamp(self._lim_lo - _q_cur, min=0.0) + torch.clamp(_q_cur - self._lim_hi, min=0.0)
         reward_limit = 1.0 - torch.clamp(_over.sum(-1) / _lim_cap, 0.0, 1.0)
         _J = joints_pos
