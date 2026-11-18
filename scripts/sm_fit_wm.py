@@ -1,0 +1,196 @@
+"""B3: fit the SuperMimic world model offline and check it (feasibility gate).
+
+Training follows the official WorldModelLearner (wm_learner.py): windows of
+--horizon rows (official 8) from the replay buffer, autoregressive rollout on
+the logged actions from the logged first state (horizon - 1 predictions),
+Bryson-weighted state loss, Adam + Muon at lr 2e-4, global grad clip 1.0,
+batch 2048. Normalizer stats come once from the whole training buffer
+(official updates them online from collected data).
+
+Offline differences (this is a diagnostic, not the training loop): a fixed
+dataset from Run G, many gradient steps, and evaluation on a held-out set.
+
+Reports, on the test buffer, open-loop errors after H steps (default 7 and
+32) per demo phase, for three predictors:
+  zero    velocity deltas = 0 (coasting), a floor any model must beat
+  oracle  true velocity deltas; tests only our integration vs the sim
+  model   the trained world model
+Gate (Anderson's call, defaults are a proposal): at H=32, median mug position
+error < --gate-mug-cm and median joint error < --gate-joint-deg, separately in
+the grasp/carry and pour phases.
+
+Needs the same MYOHAND_* flags as collection (it builds a 1-env env only to
+read the qpos/qvel layout).
+"""
+import argparse
+import os
+import sys
+import time
+
+import torch
+
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, repo_root)
+from lib.sm.buffer import ReplayBuffer  # noqa: E402
+from lib.sm.world_model import (Dynamics, MyoPourRep, build_optimizers, layout_from_env,  # noqa: E402
+                                quat_angle, rollout, state_loss)
+
+PHASES = (("approach", 0, 50), ("grasp+carry", 50, 373), ("pour", 373, 10_000))  # pour_frame = 373
+
+
+def load_buffer(path, dev):
+    d = torch.load(path, weights_only=False)
+    return ReplayBuffer.from_state_dict(d["buffer"], device=dev), d["meta"]
+
+
+def window(buf, L, n, gen):
+    e, idx = buf.sample_indices(L, n, generator=gen)
+    return {k: buf[k][e[:, None], idx] for k in ("state", "u", "frame")}
+
+
+@torch.no_grad()
+def eval_rollouts(model, rep, buf, H, n, seed, mode):
+    gen = torch.Generator(device=buf.device).manual_seed(seed)
+    w = window(buf, H + 1, n, gen)
+    S = w["state"]
+    gt = rep.from_full(S[:, 1:])
+    s = rep.from_full(S[:, 0])
+    u = w["u"][:, :H]
+    for k in range(H):
+        gk = {key: v[:, k] for key, v in gt.items()}
+        if mode == "model":
+            s = model(s, u[:, k], gk["act"])
+        elif mode == "zero":
+            s = rep.apply_prediction(s, torch.zeros(S.shape[0], rep.pred_dim, device=S.device), gk["act"])
+        elif mode == "oracle":
+            s = rep.apply_prediction(s, rep.oracle_prediction(s, gk), gk["act"])
+    g = {key: v[:, -1] for key, v in gt.items()}
+    err = {
+        "mug_cm": (s["mp"] - g["mp"]).norm(dim=-1) * 100,
+        "mug_deg": torch.rad2deg(quat_angle(s["mq"], g["mq"])),
+        "root_cm": (s["rp"] - g["rp"]).norm(dim=-1) * 100,
+        "root_deg": torch.rad2deg(quat_angle(s["rq"], g["rq"])),
+        "joint_deg": torch.rad2deg((s["qj"] - g["qj"]).abs()).mean(-1),
+    }
+    return err, w["frame"][:, 0]
+
+
+def report(tag, err, f0):
+    print(f"  {tag}")
+    for name, lo, hi in PHASES:
+        m = (f0 >= lo) & (f0 < hi)
+        if m.sum() == 0:
+            continue
+        cells = []
+        for k, v in err.items():
+            x = v[m]
+            cells.append(f"{k} {x.median():.2f}/{torch.quantile(x, 0.9):.2f}")
+        print(f"    {name:12s} n={int(m.sum()):5d}  " + "  ".join(cells))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--train", default="sm_data/collect_runG_noise1.0_E64_T1254.pt")
+    p.add_argument("--test", default="sm_data/collect_runG_latest_E64_T1000.pt")
+    p.add_argument("--steps", type=int, default=5000)
+    p.add_argument("--batch", type=int, default=2048)
+    p.add_argument("--horizon", type=int, default=8, help="rows per window (official wm.horizon)")
+    p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--hidden", default="2048,2048,2048")
+    p.add_argument("--eval-every", type=int, default=1000)
+    p.add_argument("--eval-n", type=int, default=4096)
+    p.add_argument("--eval-h", default="7,32")
+    p.add_argument("--gate-mug-cm", type=float, default=1.0)
+    p.add_argument("--gate-joint-deg", type=float, default=5.0)
+    p.add_argument("--out", default="sm_data/wm_runG.pt")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cuda:0")
+    args = p.parse_args()
+    torch.manual_seed(args.seed)
+    dev = args.device
+    Hs = [int(h) for h in args.eval_h.split(",")]
+
+    from envs.mjwarp_myohand_env import MyoHandPourEnv
+    env = MyoHandPourEnv(num_envs=1, device=dev)
+    lay = layout_from_env(env)
+    del env
+    print(f"layout: root q{lay['root_q']} v{lay['root_v']}  src q{lay['src_q']} v{lay['src_v']}  "
+          f"hand joints {len(lay['hand_q'])} (q {lay['hand_q'][0]}..{lay['hand_q'][-1]})  "
+          f"decimation {lay['decimation']} dt {lay['dt']:.5f}")
+
+    train, mtr = load_buffer(args.train, dev)
+    test, _ = load_buffer(args.test, dev)
+    assert mtr["layout"]["nq"] == lay["nq"] and mtr["layout"]["na"] == lay["na"], "buffer/env layout mismatch"
+    rep = MyoPourRep(lay, dev)
+    print(f"substep_coeff c = {rep.c:.4f}  features {rep.feat_dim}  u {train['u'].shape[-1]}  prediction {rep.pred_dim}")
+
+    model = Dynamics(rep, train["u"].shape[-1], tuple(int(h) for h in args.hidden.split(","))).to(dev)
+    n = train.num_transitions
+    with torch.no_grad():
+        model.state_normalizer.fit(rep.features(rep.from_full(train["state"][:, :n])))
+        model.action_normalizer.fit(train["u"][:, :n])
+    opts = build_optimizers(model, args.lr)
+    print(f"params {sum(p.numel() for p in model.parameters()) / 1e6:.1f} M, optimizers "
+          + ", ".join(type(o).__name__ for o in opts))
+
+    print("\nbaselines on test (median/p90 at step H):")
+    for H in Hs:
+        for mode in ("zero", "oracle"):
+            err, f0 = eval_rollouts(model, rep, test, H, args.eval_n, 123 + H, mode)
+            report(f"{mode} H={H}", err, f0)
+
+    gen = torch.Generator(device=dev).manual_seed(args.seed)
+    best = float("inf")
+    t0 = time.time()
+    model.train()
+    for step in range(1, args.steps + 1):
+        w = window(train, args.horizon, args.batch, gen)
+        S = w["state"]
+        s0 = rep.from_full(S[:, 0])
+        gt = rep.from_full(S[:, 1:])
+        pred = rollout(model, s0, w["u"][:, :-1], gt["act"])
+        loss, groups = state_loss(rep, pred, gt)
+        for o in opts:
+            o.zero_grad(set_to_none=True)
+        loss.backward()
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        for o in opts:
+            o.step()
+        if step % 200 == 0 or step == 1:
+            g = "  ".join(f"{k} {v.item():.2e}" for k, v in groups.items())
+            print(f"step {step:6d}  loss {loss.item():.4f}  gnorm {gn.item():.2f}  {g}  "
+                  f"({(time.time() - t0) / step:.3f} s/step)", flush=True)
+        if step % args.eval_every == 0 or step == args.steps:
+            model.eval()
+            print(f"eval at step {step} (model, median/p90 at step H):")
+            for H in Hs:
+                err, f0 = eval_rollouts(model, rep, test, H, args.eval_n, 123 + H, "model")
+                report(f"model H={H}", err, f0)
+            m = f0 >= 50
+            score = err["mug_cm"][m].median().item()  # last H in Hs
+            if score < best:
+                best = score
+                os.makedirs(os.path.dirname(args.out), exist_ok=True)
+                torch.save({"model": model.state_dict(), "layout": lay, "args": vars(args),
+                            "step": step, "score_mug_cm": score}, args.out)
+                print(f"  saved {args.out} (median mug err {score:.3f} cm, frames >= 50, H={Hs[-1]})")
+            model.train()
+
+    # gate at the longest H, on the final model
+    model.eval()
+    H = Hs[-1]
+    err, f0 = eval_rollouts(model, rep, test, H, args.eval_n, 999, "model")
+    print(f"\nGATE at H={H}: median mug < {args.gate_mug_cm} cm and median joint < {args.gate_joint_deg} deg")
+    ok = True
+    for name, lo, hi in PHASES[1:]:
+        m = (f0 >= lo) & (f0 < hi)
+        mc, jd = err["mug_cm"][m].median().item(), err["joint_deg"][m].median().item()
+        pas = mc < args.gate_mug_cm and jd < args.gate_joint_deg
+        ok &= pas
+        print(f"  {name:12s} mug {mc:.2f} cm  joint {jd:.2f} deg  -> {'PASS' if pas else 'FAIL'}")
+    print("GATE PASS" if ok else "GATE FAIL")
+    print(f"total time {(time.time() - t0) / 60:.1f} min")
+
+
+if __name__ == "__main__":
+    main()
