@@ -11,6 +11,9 @@ Row t of env e (official _step_and_store convention):
   truncated  bool   step t hit the episode end (success_buf)
   reward     float  r_t from the env
   rterms     (K)    env reward_dict terms, names in meta["rterm_names"]
+  next_tip_force  (20)  PhysGraph tip_force obs after the step: cfrc_ext[distal, 3:6] + norm (world)
+  next_pad_force  (20)  pad-side part of it, in each distal body frame + norm (lib/sm/contact.py)
+  next_act_len/vel/force (na each)  mujoco_warp actuator_length/velocity/force after the step
   next_joints_pos (60)  MuJoCo positions of the 20 tracked points after the
                     step (label for later FK / world-model checks)
 
@@ -40,6 +43,7 @@ sys.path.insert(0, repo_root)
 from envs.mjwarp_myohand_env import MyoHandPourEnv  # noqa: E402
 from lib.rl.network_builder_myohand_transformer import MyoHandTransformerNetwork  # noqa: E402
 from lib.sm.buffer import FieldSpec, ReplayBuffer  # noqa: E402
+from lib.sm.contact import PadForce  # noqa: E402
 from lib.sm.state import PID_FIELDS, get_state, layout_of  # noqa: E402
 
 RMS = "running_mean_std.running_mean_std"
@@ -95,6 +99,9 @@ def main():
 
     obs = env.reset()
     nu = int(env.mj_model.nu)
+    pad_force = PadForce(env)
+    tip_ids = torch.as_tensor(env.tip_body_ids, device=dev, dtype=torch.long)
+    cons_err, cons_ref = 0.0, 0.0
     buf, schema, rterm_names = None, None, None  # built on the first step, once reward_dict names are known
 
     ep_lens, ep_term = [], []
@@ -125,8 +132,18 @@ def main():
                 "reward": FieldSpec(),
                 "rterms": FieldSpec(len(rterm_names)),
                 "next_joints_pos": FieldSpec(60),
+                "next_tip_force": FieldSpec(20),
+                "next_pad_force": FieldSpec(20),
+                "next_act_len": FieldSpec(nu),
+                "next_act_vel": FieldSpec(nu),
+                "next_act_force": FieldSpec(nu),
             }
             buf = ReplayBuffer(schema, args.steps, args.num_envs, device=dev)
+        pad_obs, tot_world = pad_force(env)
+        cf = wp.to_torch(env.data.cfrc_ext)[:, tip_ids, 3:6].float()
+        tip_force = torch.cat([cf, cf.norm(dim=-1, keepdim=True)], -1).reshape(args.num_envs, 20)
+        cons_err = max(cons_err, (tot_world - cf).norm(dim=-1).max().item())
+        cons_ref = max(cons_ref, cf.norm(dim=-1).max().item())
         term = env.failure_buf_.clone()
         trunc = env.success_buf_.clone()
         buf.insert({
@@ -134,6 +151,10 @@ def main():
             "terminated": term, "truncated": trunc, "reward": r.float(),
             "rterms": torch.stack([info["reward_dict"][k].float() for k in rterm_names], -1),
             "next_joints_pos": env.current_joints_pos_.reshape(args.num_envs, -1).float(),
+            "next_tip_force": tip_force, "next_pad_force": pad_obs,
+            "next_act_len": wp.to_torch(env.data.actuator_length).float(),
+            "next_act_vel": wp.to_torch(env.data.actuator_velocity).float(),
+            "next_act_force": wp.to_torch(env.data.actuator_force).float(),
         })
         done = term | trunc
         if done.any():
@@ -156,6 +177,12 @@ def main():
     nd = ~dn[:, :-1]
     fdiff = (buf["u"][:, :-1, 0:3] - S[:, 1:, force_sl]).abs()[nd]
     print(f"max |u_force[t] - state_pid_force[t+1]| (non-done rows) = {fdiff.max().item():.2e}  (expect 0)")
+    print(f"contact extraction: max |sum of contacts - cfrc_ext| = {cons_err:.2e} N  (max |cfrc_ext| {cons_ref:.1f} N, expect ~0)")
+    tf = buf["next_tip_force"].view(-1, 5, 4)[..., 3]
+    pf = buf["next_pad_force"].view(-1, 5, 4)[..., 3]
+    print("per finger (thumb..pinky): contact rate " + " ".join(f"{x:.2f}" for x in (tf > 1e-6).float().mean(0).tolist())
+          + " | mean |tip| N " + " ".join(f"{x:.1f}" for x in tf.mean(0).tolist())
+          + " | mean |pad| N " + " ".join(f"{x:.1f}" for x in pf.mean(0).tolist()))
     nan = {k: int((~torch.isfinite(buf[k].float())).sum()) for k in schema}
     print("non-finite counts:", {k: v for k, v in nan.items() if v} or "none")
 

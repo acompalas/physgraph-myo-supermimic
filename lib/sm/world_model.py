@@ -244,16 +244,38 @@ def build_mlp(input_dim, hidden_dims, output_dim):
 
 
 class Dynamics(nn.Module):
-    def __init__(self, rep, u_dim, hidden_dims=(2048, 2048, 2048)):
+    """n_obs > 0: the same MLP also outputs n_obs standardized observations of
+    the NEXT state (FreeMusco-style extra outputs, predicted from s_t and u_t),
+    used for contact forces that depend on the applied action, not on the state only."""
+
+    def __init__(self, rep, u_dim, hidden_dims=(2048, 2048, 2048), n_obs=0):
         super().__init__()
         self.rep = rep
+        self.n_obs = n_obs
         self.state_normalizer = Normalizer(rep.feat_dim)
         self.action_normalizer = Normalizer(u_dim)
-        self.mlp = build_mlp(rep.feat_dim + u_dim, hidden_dims, rep.pred_dim)
+        self.register_buffer("obs_mean", torch.zeros(max(n_obs, 1)))
+        self.register_buffer("obs_std", torch.ones(max(n_obs, 1)))
+        self.mlp = build_mlp(rep.feat_dim + u_dim, hidden_dims, rep.pred_dim + n_obs)
+
+    @torch.no_grad()
+    def fit_obs_stats(self, targets):
+        t = targets.reshape(-1, targets.shape[-1]).double()
+        self.obs_mean.copy_(t.mean(0).float())
+        self.obs_std.copy_(t.std(0, unbiased=False).float().clamp(min=1e-3))
+
+    def step(self, s, u, act_next):
+        """-> (next state, standardized obs prediction or None)"""
+        x = torch.cat([self.state_normalizer(self.rep.features(s)), self.action_normalizer(u)], -1)
+        out = self.mlp(x)
+        nxt = self.rep.apply_prediction(s, out[..., :self.rep.pred_dim], act_next)
+        return nxt, (out[..., self.rep.pred_dim:] if self.n_obs else None)
 
     def forward(self, s, u, act_next):
-        x = torch.cat([self.state_normalizer(self.rep.features(s)), self.action_normalizer(u)], -1)
-        return self.rep.apply_prediction(s, self.mlp(x), act_next)
+        return self.step(s, u, act_next)[0]
+
+    def obs_denorm(self, o):
+        return o * self.obs_std + self.obs_mean
 
 
 def build_optimizers(model, lr):
@@ -284,10 +306,68 @@ def stack_states(states):
     return {k: torch.stack([s[k] for s in states], 1) for k in states[0]}
 
 
-def rollout(model, s0, u, act_next):
-    """Autoregressive rollout over u (B, K, U); act_next (B, K, na)."""
-    s, out = s0, []
+def rollout(model, s0, u, act_next, with_obs=False):
+    """Autoregressive rollout over u (B, K, U); act_next (B, K, na).
+    with_obs: also return the stacked standardized obs outputs (B, K, n_obs)."""
+    s, out, obs = s0, [], []
     for k in range(u.shape[1]):
-        s = model(s, u[:, k], act_next[:, k])
+        s, o = model.step(s, u[:, k], act_next[:, k])
         out.append(s)
-    return stack_states(out)
+        obs.append(o)
+    states = stack_states(out)
+    if not with_obs:
+        return states
+    return states, (torch.stack(obs, 1) if obs[0] is not None else None)
+
+
+# ---------------- learned observation head ----------------
+def forces30(tip20, pad20):
+    """(…, 20) tip + (…, 20) pad in PhysGraph layout (5 x [f3, |f|]) -> (…, 30) vectors only."""
+    t = tip20.reshape(*tip20.shape[:-1], 5, 4)[..., :3]
+    p = pad20.reshape(*pad20.shape[:-1], 5, 4)[..., :3]
+    return torch.cat([t.flatten(-2), p.flatten(-2)], -1)
+
+
+def forces_to_obs(f30):
+    """(…, 30) -> (tip20, pad20) with magnitudes, PhysGraph layout."""
+    f = f30.reshape(*f30.shape[:-1], 2, 5, 3)
+    o = torch.cat([f, f.norm(dim=-1, keepdim=True)], -1)
+    return o[..., 0, :, :].flatten(-2), o[..., 1, :, :].flatten(-2)
+
+
+class ObsHead(nn.Module):
+    """Learned observation o_hat = g(s_hat) of SuperMimic eq. (1), for the
+    quantities our analytic observation cannot produce: distal-phalanx tip
+    force (world) and pad-side force (distal body frame), 5 x 3 each.
+    Trained on rolled-out states with a per-component standardized MSE."""
+
+    def __init__(self, rep, hidden_dims=(512, 512, 512), out_dim=30, u_dim=0):
+        super().__init__()
+        self.rep = rep
+        self.u_dim = u_dim  # > 0: also condition on the action u_t that produced s_{t+1}
+        self.in_normalizer = Normalizer(rep.feat_dim)
+        self.u_normalizer = Normalizer(max(u_dim, 1))
+        self.register_buffer("out_mean", torch.zeros(out_dim))
+        self.register_buffer("out_std", torch.ones(out_dim))
+        self.mlp = build_mlp(rep.feat_dim + u_dim, hidden_dims, out_dim)
+
+    @torch.no_grad()
+    def fit_stats(self, feats, targets, u=None):
+        self.in_normalizer.fit(feats)
+        if self.u_dim:
+            self.u_normalizer.fit(u)
+        t = targets.reshape(-1, targets.shape[-1]).double()
+        self.out_mean.copy_(t.mean(0).float())
+        self.out_std.copy_(t.std(0, unbiased=False).float().clamp(min=1e-3))
+
+    def forward_norm(self, s, u=None):
+        x = self.in_normalizer(self.rep.features(s))
+        if self.u_dim:
+            x = torch.cat([x, self.u_normalizer(u)], -1)
+        return self.mlp(x)
+
+    def forward(self, s, u=None):
+        return self.forward_norm(s, u) * self.out_std + self.out_mean
+
+    def loss(self, s, targets, u=None):
+        return ((self.forward_norm(s, u) - (targets - self.out_mean) / self.out_std) ** 2).mean()
