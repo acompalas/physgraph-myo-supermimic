@@ -21,3 +21,4 @@ third_party/regrind/
 runs/*/
 dumps/*/
 eval_checkpoints/
+sm_data/
