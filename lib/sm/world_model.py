@@ -300,14 +300,14 @@ class Dynamics(nn.Module):
         return o * self.obs_std + self.obs_mean
 
 
-def build_optimizers(model, lr):
+def build_optimizers(model, lr, betas=(0.9, 0.999)):
     """Official learner_utils.build_optimizers: Muon on hidden Linear weights
     (between the first and last Linear of each Sequential), Adam on the rest."""
     hidden = [lin.weight for seq in model.modules() if isinstance(seq, nn.Sequential)
               for lin in [m for m in seq if isinstance(m, nn.Linear)][1:-1]]
     ids = {id(p) for p in hidden}
     rest = [p for p in model.parameters() if id(p) not in ids]
-    opts = [torch.optim.Adam(rest, lr=lr, betas=(0.9, 0.999))]
+    opts = [torch.optim.Adam(rest, lr=lr, betas=betas)]
     if hidden:
         opts.append(torch.optim.Muon(hidden, lr=lr, adjust_lr_fn="match_rms_adamw"))
     return opts

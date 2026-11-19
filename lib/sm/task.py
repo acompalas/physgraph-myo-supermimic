@@ -248,6 +248,16 @@ class TorchTask:
         ], -1).amax(-1)
         return r, T, z_track, z_err
 
+    @property
+    def max_step_reward(self):
+        """Upper bound of reward(): every term is in [0, 1] except the
+        per-group joint_q, which is a sum of group weights (wrist 0.3, thumb 1,
+        4 fingers 0.5 by default). Official V_max = max_step_reward / (1 - gamma)."""
+        fixed = (0.1 + 0.6 + 0.9 + 0.8 + 0.75 + 0.6 + 0.6 + 0.5 + 0.3 + 5.0 + 1.0
+                 + 0.1 + 0.05 + 0.1 + 0.1 + 0.1 + 0.5)
+        jq_max = 1.0 if self.jq_mode_g else float(self.env._jq_gw.sum())
+        return fixed + self.tr_w + self.pad_w + self.jq_w * jq_max + self.lim_w + self.ffs_w
+
     @staticmethod
     def termination(z_track, z_err, steps_since_reset, softness=0.05):
         """(soft d in [0,1], hard bool). Hard equals the env's failure_buf.
