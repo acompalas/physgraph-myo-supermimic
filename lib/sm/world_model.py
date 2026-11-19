@@ -159,6 +159,28 @@ class MyoPourRep:
             "act": full[..., self.a0:self.a0 + self.na],
         }
 
+    def to_full(self, s, template, pid=None):
+        """Inverse of from_full: write the carried state into a copy of `template`
+        (…, 142) (destination mug and anything not carried are kept from it).
+        Velocities go back to MuJoCo's free-joint convention (world linear,
+        body angular). Differentiable."""
+        full = template.clone()
+        full[..., self.rq0:self.rq0 + 3] = s["rp"]
+        full[..., self.rq0 + 3:self.rq0 + 7] = s["rq"]
+        full[..., self.rv0:self.rv0 + 3] = quat_apply(s["rq"], s["rv"])
+        full[..., self.rv0 + 3:self.rv0 + 6] = s["rw"]
+        full[..., self.hq] = s["qj"]
+        full[..., self.hv] = s["vj"]
+        full[..., self.mq0:self.mq0 + 3] = s["mp"]
+        full[..., self.mq0 + 3:self.mq0 + 7] = s["mq"]
+        full[..., self.mv0:self.mv0 + 3] = quat_apply(s["mq"], s["mv"])
+        full[..., self.mv0 + 3:self.mv0 + 6] = s["mw"]
+        full[..., self.a0:self.a0 + self.na] = s["act"]
+        if pid is not None:
+            p0 = self.a0 + self.na
+            full[..., p0:p0 + pid.shape[-1]] = pid
+        return full
+
     def features(self, s):
         Rr = matrix_from_quat(s["rq"])
         Rm = matrix_from_quat(s["mq"])
