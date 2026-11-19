@@ -15,12 +15,12 @@ spec:
         resources:
           limits:
             nvidia.com/gpu: 1
-            cpu: "8"
-            memory: 32Gi
+            cpu: "2"
+            memory: 16Gi
           requests:
             nvidia.com/gpu: 1
-            cpu: "8"
-            memory: 32Gi
+            cpu: "2"
+            memory: 16Gi
         volumeMounts:
         - name: dshm
           mountPath: /dev/shm
@@ -38,6 +38,10 @@ spec:
       - key: nautilus.io/reservation
         operator: Equal
         value: erl-ucsd
+        effect: NoSchedule
+      - key: nautilus.io/reservation
+        operator: Equal
+        value: erl
         effect: NoSchedule
       affinity:
         nodeAffinity:

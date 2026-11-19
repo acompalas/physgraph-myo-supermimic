@@ -18,6 +18,7 @@ real-env data by the runner, applied as (x - mean) / (std + 1e-2): the
 rsl_rl EmpiricalNormalization the official code uses.
 """
 import torch
+import torch.utils.checkpoint
 import torch.nn as nn
 
 from lib.rl.network_builder_myohand_transformer import MyoHandLatentEncoder, MyoHandMLPAction
@@ -66,8 +67,15 @@ class SMActor(nn.Module):
         for k in OBS_KEYS:
             self.norm[k].update(obs[k])
 
-    def forward(self, obs):
+    grad_ckpt = False  # recompute activations in backward; same gradients, ~1 extra forward per step
+
+    def _forward(self, obs):
         return self.head(self.encoder({k: self.norm[k](obs[k]) for k in OBS_KEYS}))
+
+    def forward(self, obs):
+        if self.grad_ckpt and torch.is_grad_enabled():
+            return torch.utils.checkpoint.checkpoint(self._forward, obs, use_reentrant=False)
+        return self._forward(obs)
 
 
 class SMCritic(nn.Module):

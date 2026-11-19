@@ -39,6 +39,7 @@ def main():
     p.add_argument("--H", type=int, default=32)
     p.add_argument("--softness", type=float, default=0.05)
     p.add_argument("--no-compile", action="store_true")
+    p.add_argument("--grad-ckpt", action="store_true")
     args = p.parse_args()
     dev = "cuda:0"
     H = args.H
@@ -64,6 +65,8 @@ def main():
     obs_dims = {k: v.shape[0] for k, v in env.observation_space.spaces.items()}
     print(f"obs dims {obs_dims}")
     actor = SMActor(obs_dims).to(dev)
+    actor.grad_ckpt = args.grad_ckpt
+    print(f"actor grad checkpointing {actor.grad_ckpt}")
     print(f"actor params {sum(p.numel() for p in actor.parameters()) / 1e6:.2f} M")
 
     for B in (int(b) for b in args.batches.split(",")):
