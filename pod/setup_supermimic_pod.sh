@@ -13,7 +13,7 @@
 #     (scripts/retargeting/myohand_def.py inherits DexHand from it)
 #   kubectl cp the untracked demos (real files, not symlinks) and sm_data/*.pt, check md5
 #   python scripts/sm_check_imports.py  -> expect only cv2 + pytorch_lightning FAILs (unused)
-# GPU: no V100 (sm_70): mujoco-warp 3.13 ccd_kernel fails to load there (2026-11-18).
+# git/tmux: apt can be unreachable; use conda create -y -p /data/tools -c conda-forge git tmux (persists on the PVC)
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
@@ -41,17 +41,14 @@ fi
 conda activate physgraph-myo
 
 echo "== [4/5] Python packages (same pins as setup_physgraph_myo_env.sh) =="
-# cu130 wheels start at sm_75; V100 (sm_70) needs cu126 (found 2026-11-18)
-CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d .)
-if [ "$CC" -lt 75 ]; then TORCH_CUDA=cu126; else TORCH_CUDA=cu130; fi
-echo "compute capability $CC -> torch $TORCH_CUDA"
+TORCH_CUDA=cu126  # = Run O; covers sm_50..sm_90 (sm_89 via sm_86); cu130 starts at sm_75
 pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/$TORCH_CUDA
 pip install mujoco==3.12.0
 pip install pytorch_kinematics==0.10.0 rl_games==1.6.5 omegaconf dm-tree gym hydra-core wandb h5py
 pip install git+https://github.com/otaheri/chamfer_distance
 pip install git+https://github.com/otaheri/bps_torch
 pip install warp-lang==1.17.0
-pip install --no-deps mujoco-warp==3.13.0  # unpinned pulls 4.x + mujoco-core 4.x and breaks mujoco 3.12.0
+pip install --no-deps mujoco-warp==3.12.0  # = Run O; 3.13.0 fails on a cold warp cache (ccd_kernel KeyError), 4.x breaks mujoco 3.12.0
 pip install numpy==2.4.6
 
 echo "== [5/5] Verify =="
