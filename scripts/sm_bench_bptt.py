@@ -40,6 +40,7 @@ def main():
     p.add_argument("--softness", type=float, default=0.05)
     p.add_argument("--no-compile", action="store_true")
     p.add_argument("--grad-ckpt", action="store_true")
+    p.add_argument("--compile-actor", action="store_true")
     args = p.parse_args()
     dev = "cuda:0"
     H = args.H
@@ -66,6 +67,9 @@ def main():
     print(f"obs dims {obs_dims}")
     actor = SMActor(obs_dims).to(dev)
     actor.grad_ckpt = args.grad_ckpt
+    if args.compile_actor:
+        actor._forward = torch.compile(actor._forward, dynamic=False)
+    print(f"actor compiled {args.compile_actor}")
     print(f"actor grad checkpointing {actor.grad_ckpt}")
     print(f"actor params {sum(p.numel() for p in actor.parameters()) / 1e6:.2f} M")
 
