@@ -557,6 +557,7 @@ class MyoHandPourEnv:
         # convention -- see _compute_obs() for the full rationale
         self._obs_act = os.environ.get("MYOHAND_OBS_ACT", "0") == "1"
         self._obs_pad = os.environ.get("MYOHAND_OBS_PAD", "0") == "1"  # 15 = 5 pads x (target - current), appended AFTER act
+        self._obs_padf = os.environ.get("MYOHAND_OBS_PADF", "0") == "1"  # 20 = pad-side contact force (lib/sm/contact.py), appended LAST
         assert not self._obs_pad or self.demo_pad_pos is not None, "MYOHAND_OBS_PAD=1 needs MYOHAND_PADPOS_W>0 and the v2pad pkl"
         self._na = int(self.mj_model.na)
         rh_proprio_dim = 23 * 3 + 13   # dof_pos/cos/sin + wrist pos/quat/vel/angvel
@@ -567,7 +568,7 @@ class MyoHandPourEnv:
         # wrist(23) + joints(180=60*3) + obj(23) + obj_to_joints(21) + gt_tips(5) + bps(128)
         rh_target_dim = 23 + 180 + 23 + 21 + 5 + 128  # = 380
         self.observation_space = gym.spaces.Dict({
-            "proprioception": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_proprio_dim * 2 + (self._na if self._obs_act else 0) + (15 if self._obs_pad else 0),), dtype=np.float32),
+            "proprioception": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_proprio_dim * 2 + (self._na if self._obs_act else 0) + (15 if self._obs_pad else 0) + (20 if self._obs_padf else 0),), dtype=np.float32),
             "privileged": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_privileged_dim * 2,), dtype=np.float32),
             "target": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(rh_target_dim * 2,), dtype=np.float32),
         })  # lib/rl/base.py's play_steps unconditionally does
@@ -876,6 +877,11 @@ class MyoHandPourEnv:
             _pt = torch.cross(_qu, _pv, dim=-1)
             _pad_w = _pb + _pv + 2.0 * (_qw * _pt + torch.cross(_qu, _pt, dim=-1))
             proprioception = torch.cat([proprioception, (self.demo_pad_pos[idx] - _pad_w).reshape(_pb.shape[0], -1)], dim=-1)
+        if self._obs_padf:
+            if not hasattr(self, "_padf"):
+                from lib.sm.contact import PadForce
+                self._padf = PadForce(self)
+            proprioception = torch.cat([proprioception, self._padf(self)[0]], dim=-1)
         privileged = torch.cat([rh_privileged, lh_privileged], dim=-1)
         target = torch.cat([rh_target, lh_target], dim=-1)
 

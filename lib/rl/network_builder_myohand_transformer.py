@@ -59,7 +59,8 @@ class MyoHandLatentEncoder(nn.Module):
         # tokenizers -- real MLP_new, our own verified input dims
         self._na = 39 if os.environ.get("MYOHAND_OBS_ACT", "0") == "1" else 0  # muscle activations -> RH token
         self._npad = 15 if os.environ.get("MYOHAND_OBS_PAD", "0") == "1" else 0  # pad target-current deltas -> RH token
-        self.rh_tokenizer = MLP_new(141 + self._na + self._npad)
+        self._npadf = 20 if os.environ.get("MYOHAND_OBS_PADF", "0") == "1" else 0  # pad-side contact force -> RH token
+        self.rh_tokenizer = MLP_new(141 + self._na + self._npad + self._npadf)
         self.lh_tokenizer = MLP_new(141)
         self.tool_tokenizer = MLP_new(129)
         self.obj_tokenizer = MLP_new(129)
@@ -152,6 +153,9 @@ class MyoHandLatentEncoder(nn.Module):
             rh_obs = torch.cat([rh_obs, obs["proprioception"][:, 164:164 + self._na]], dim=-1)
         if self._npad:
             rh_obs = torch.cat([rh_obs, obs["proprioception"][:, 164 + self._na:164 + self._na + self._npad]], dim=-1)
+        if self._npadf:
+            o = 164 + self._na + self._npad
+            rh_obs = torch.cat([rh_obs, obs["proprioception"][:, o:o + self._npadf]], dim=-1)
 
         tool_obs = torch.cat([r_oweight, r_curr[:, 0, 252:]], dim=-1)   # obj_weight + src BPS
         obj_obs = torch.cat([l_oweight, l_curr[:, 0, 252:]], dim=-1)    # obj_weight + dst BPS

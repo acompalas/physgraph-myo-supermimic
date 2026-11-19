@@ -66,12 +66,11 @@ class ImaginedEnv:
         self.steps = frame.clone()  # steps since reset == frame (no random start)
         self.s = self.rep.from_full(self.full)
         self.tip, self.pad = tip, pad
+        self.k, self.k_prev = self.task.kin(self.full), self.task.kin(self.prev_full)
         return self.obs()
 
     def obs(self):
-        o = self.task.obs(self.full, self.prev_full, self.frame, self.tip)
-        o["pad_force"] = self.pad
-        return o
+        return self.task.obs(self.full, self.prev_full, self.frame, self.tip, self.k, self.k_prev, self.pad)
 
     # ---------- step ----------
     def step(self, a_raw):
@@ -83,9 +82,11 @@ class ImaginedEnv:
         tip, pad = forces_to_obs(f30)
         frame_next = torch.clamp(self.frame + 1, max=self.seq_len - 1)
         steps_next = self.steps + 1
-        r, terms, zt, ze = self.task.reward(full_next, self.full, u, frame_next, self.scale_factor)
+        k_next = self.task.kin(full_next)  # the only FK call per step; the previous one is reused
+        r, terms, zt, ze = self.task.reward(full_next, self.full, u, frame_next, self.scale_factor, k_next, self.k)
         d_soft, d_hard = self.task.termination(zt, ze, steps_next, self.softness)
         self.prev_full, self.full, self.s = self.full, full_next, s_next
+        self.k_prev, self.k = self.k, k_next
         self.frame, self.steps, self.tip, self.pad = frame_next, steps_next, tip, pad
         info = {"terms": terms, "hard": d_hard, "u": u, "z_track": zt, "z_err": ze}
         return self.obs(), r, d_soft, info

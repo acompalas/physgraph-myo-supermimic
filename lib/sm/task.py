@@ -91,6 +91,8 @@ class TorchTask:
         self.pad_w = float(e._pad_w)
         self.obs_act = bool(e._obs_act)
         self.obs_pad = bool(e._obs_pad)
+        self.obs_padf = bool(getattr(e, "_obs_padf", False))
+        self._fk_call = self.fk
         self.pad_body_ids = None
         if e.demo_pad_pos is not None:
             import mujoco
@@ -106,7 +108,7 @@ class TorchTask:
     def kin(self, s):
         """FK quantities of a full state: tracked points (…,20,3), body xpos/xquat."""
         qpos = s[..., :self.nq]
-        xpos, xquat = self.fk(qpos)
+        xpos, xquat = self._fk_call(qpos)
         sites = self.fk.site_xpos(xpos, xquat, self.site_ids)
         jp = torch.where(self.is_site[:, None], sites, xpos[..., self.body_ids, :])
         return {"joints_pos": jp, "xpos": xpos, "xquat": xquat}
@@ -254,7 +256,15 @@ class TorchTask:
         return torch.sigmoid((z - 1.0) / softness), z > 1.0
 
     # ---------- observation ----------
-    def obs(self, s, s_prev, frame, tip_force, k=None, k_prev=None):
+    def compile(self):
+        """torch.compile the FK, reward and obs (C2 profile: FK 73 -> 3 ms, imagined
+        step 253 -> 35 ms at batch 1024 on the 2060; ~6 min to compile once)."""
+        self._fk_call = torch.compile(self.fk.__call__, dynamic=False)
+        self.reward = torch.compile(self.reward, dynamic=False)
+        self.obs = torch.compile(self.obs, dynamic=False)
+        return self
+
+    def obs(self, s, s_prev, frame, tip_force, k=None, k_prev=None, pad_force=None):
         """Actor observation of state s (its own frame), PhysGraph layout.
         tip_force: (…, 20) cfrc-style distal force + norm (real or predicted)."""
         e = self.env
@@ -306,5 +316,7 @@ class TorchTask:
             proprio = torch.cat([proprio, act], -1)
         if self.obs_pad:
             proprio = torch.cat([proprio, (e.demo_pad_pos[idx] - self._pad_world(k, idx.shape)).flatten(-2)], -1)
+        if self.obs_padf:
+            proprio = torch.cat([proprio, pad_force], -1)
         return {"proprioception": proprio, "privileged": torch.cat([rh_priv, lh_priv], -1),
                 "target": torch.cat([rh_target, lh_target], -1)}
