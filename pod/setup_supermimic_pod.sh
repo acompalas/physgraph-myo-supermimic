@@ -5,6 +5,15 @@
 # /data/PhysGraph prerequisite (supermimic does not import it).
 # apt packages do not persist: rerun step 1 on every new pod.
 # Usage: bash pod/setup_supermimic_pod.sh
+#
+# Before/after this script (one-time per PVC):
+#   git clone --recurse-submodules https://github.com/acompalas/physgraph-myo-supermimic.git /data/physgraph-myo-supermimic
+#     (third_party/myo_sim holds the MyoHand meshes; plain clone leaves it empty)
+#   copy PhysGraph's physgraph_envs/lib/envs/dexhands/base.py to /data/PhysGraph/<same path>
+#     (scripts/retargeting/myohand_def.py inherits DexHand from it)
+#   kubectl cp the untracked demos (real files, not symlinks) and sm_data/*.pt, check md5
+#   python scripts/sm_check_imports.py  -> expect only cv2 + pytorch_lightning FAILs (unused)
+# GPU: no V100 (sm_70): mujoco-warp 3.13 ccd_kernel fails to load there (2026-11-18).
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
@@ -32,12 +41,17 @@ fi
 conda activate physgraph-myo
 
 echo "== [4/5] Python packages (same pins as setup_physgraph_myo_env.sh) =="
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
+# cu130 wheels start at sm_75; V100 (sm_70) needs cu126 (found 2026-11-18)
+CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d .)
+if [ "$CC" -lt 75 ]; then TORCH_CUDA=cu126; else TORCH_CUDA=cu130; fi
+echo "compute capability $CC -> torch $TORCH_CUDA"
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/$TORCH_CUDA
 pip install mujoco==3.12.0
-pip install pytorch_kinematics rl_games omegaconf dm-tree gym hydra-core wandb h5py
+pip install pytorch_kinematics==0.10.0 rl_games==1.6.5 omegaconf dm-tree gym hydra-core wandb h5py
 pip install git+https://github.com/otaheri/chamfer_distance
 pip install git+https://github.com/otaheri/bps_torch
-pip install mujoco-warp
+pip install warp-lang==1.17.0
+pip install --no-deps mujoco-warp==3.13.0  # unpinned pulls 4.x + mujoco-core 4.x and breaks mujoco 3.12.0
 pip install numpy==2.4.6
 
 echo "== [5/5] Verify =="
