@@ -58,6 +58,7 @@ def main():
     p.add_argument("--grad-ckpt", action="store_true")
     p.add_argument("--compile-actor", action="store_true")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--reward-scale", type=float, default=0.0, help="0 = env dt (official dt-scaled reward)")
     args = p.parse_args()
     dev = "cuda:0"
     assert os.environ.get("MYOHAND_OBS_PADF") == "1", "run with MYOHAND_OBS_PADF=1 (training obs)"
@@ -99,12 +100,12 @@ def main():
         x = critic_input(ie, o)
     critic = SMCriticWM(rep_dim, obs_dims["target"], task.seq_len).to(dev)
     assert x.shape[-1] == rep_dim + obs_dims["target"] + 1
-    cfg = LearnerCfg(batch_size=B, horizon=H)
+    cfg = LearnerCfg(batch_size=B, horizon=H, reward_scale=args.reward_scale if args.reward_scale > 0 else task.dt)
     r_max = task.max_step_reward
     learner = ActorCriticLearner(actor, critic, ie, cfg, r_max)
     print(f"obs dims {obs_dims} | critic input {x.shape[-1]} (rep {rep_dim} + goal {obs_dims['target']} + phase)")
     print(f"actor {sum(p.numel() for p in actor.parameters()) / 1e6:.2f} M, critic {sum(p.numel() for p in critic.parameters()) / 1e3:.0f} k params | "
-          f"max_step_reward {r_max:.2f}, V_max {learner.v_max:.0f} | B {B} H {H} softness {args.softness}")
+          f"max_step_reward {r_max:.2f}, V_max {learner.v_max:.0f} | B {B} H {H} softness {args.softness} reward_scale {cfg.reward_scale:.4f}")
 
     # 1. reward bound on imagined rewards (random-init actor)
     with torch.no_grad():

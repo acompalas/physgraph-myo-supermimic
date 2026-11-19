@@ -16,7 +16,9 @@ learners/policy_learner.py + learner_utils.py), on our ImaginedEnv:
                random permutation of the T*B samples, 5 epochs x 4
                minibatches, MSE, grad-norm clip 1.0; Adam (default betas) +
                Muon, lr 2e-4
-  V_max      : max_step_reward / (1 - gamma)
+  V_max      : max_step_reward * reward_scale / (1 - gamma)
+  rewards    : scaled by reward_scale = dt, as the official rewards are dt-scaled;
+               logged return / reward_per_step are unscaled
 
 Critic input (official: privileged WM state + goal, no input normalizer):
 our world-model state features (MyoPourRep.features, 124) + the actor's
@@ -44,6 +46,7 @@ class LearnerCfg:
     beta2: float = 0.95
     grad_clip_value: float = 0.1
     survival_masking: bool = True
+    reward_scale: float = 1.0  # official rewards are dt-scaled (weight * step_dt); set to env dt
 
 
 class SMCriticWM(nn.Module):
@@ -100,7 +103,7 @@ class ActorCriticLearner:
         self.actor_params = list(actor.parameters())
         self.actor_opts = build_optimizers(actor, cfg.lr, betas=(0.9, cfg.beta2))
         self.critic_opts = build_optimizers(critic, cfg.lr)
-        self.v_max = max_step_reward / (1.0 - cfg.gamma)
+        self.v_max = max_step_reward * cfg.reward_scale / (1.0 - cfg.gamma)
 
     def update(self, start=None):
         cfg, ie = self.cfg, self.ienv
@@ -114,6 +117,7 @@ class ActorCriticLearner:
         for t in range(cfg.horizon):
             crit_x.append(critic_input(ie, obs).detach())
             obs, r, d, _ = ie.step(self.actor(obs))
+            r = r * cfg.reward_scale
             rews.append(r.detach())
             dones.append(d.detach())
             ret = ret + cfg.gamma ** t * survival * r
@@ -126,8 +130,8 @@ class ActorCriticLearner:
         loss = -ret.mean()
         grad_norm = _optimize_step(self.actor_opts, loss, self.actor_params, 1.0, cfg.grad_clip_value)
         stats = {
-            "return": ret.mean().detach(),
-            "reward_per_step": torch.stack(rews).mean(),
+            "return": ret.mean().detach() / cfg.reward_scale,
+            "reward_per_step": torch.stack(rews).mean() / cfg.reward_scale,
             "survival_end": (survival.mean() if torch.is_tensor(survival) else torch.tensor(survival)).detach(),
             "grad_norm": grad_norm.detach(),
         }
