@@ -676,6 +676,10 @@ class MyoHandPourEnv:
             _sp = wp.to_torch(self.data.site_xpos)
             _jp = torch.where(self.is_site_mask[None, :, None], _sp[:, self.site_ids[1:].clip(min=0), :], _xp[:, self.body_ids[1:], :])
             self.prev_body_xpos[env_ids] = _jp[env_ids]
+            # the first obs of the new episode reads these (set by _compute_reward); refresh them too
+            if getattr(self, 'current_joints_pos_', None) is not None:
+                self.current_joints_pos_[env_ids] = _jp[env_ids]
+                self.current_joints_vel_[env_ids] = 0.0
 
     def reset(self):
         """Full reset -- all envs. Used once at the very start of training."""
