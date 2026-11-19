@@ -648,7 +648,11 @@ class MyoHandPourEnv:
         qpos[env_ids, self.dst_adr + 3:self.dst_adr + 7] = rotmat_to_quat(dst_pose0[:3, :3][None])[0]
 
         qvel[env_ids] = 0.0
-        if os.environ.get('MYOHAND_RANDOM_START', '0') == '1' and getattr(self.model, 'na', 0) > 0:
+        # reset fix (SuperMimic repo, 2026-11-18): muscle activations were only zeroed with
+        # RANDOM_START=1, so episodes began with the previous episode's activations.
+        # MYOHAND_RESET_FIX=0 restores the old behavior (exact parity with runs G..N).
+        _reset_fix = os.environ.get('MYOHAND_RESET_FIX', '1') == '1'
+        if (_reset_fix or os.environ.get('MYOHAND_RANDOM_START', '0') == '1') and getattr(self.model, 'na', 0) > 0:
             wp.to_torch(self.data.act)[env_ids] = 0.0
 
         self.progress_buf[env_ids] = seq_idx
@@ -665,6 +669,13 @@ class MyoHandPourEnv:
         self._applied_torque[env_ids] = 0.0
 
         mjw.forward(self.model, self.data)
+        # reset fix: joints_vel (reward and obs) is a finite difference against prev_body_xpos,
+        # which still held the previous episode's last positions on the first step
+        if _reset_fix and self.prev_body_xpos is not None:
+            _xp = wp.to_torch(self.data.xpos)
+            _sp = wp.to_torch(self.data.site_xpos)
+            _jp = torch.where(self.is_site_mask[None, :, None], _sp[:, self.site_ids[1:].clip(min=0), :], _xp[:, self.body_ids[1:], :])
+            self.prev_body_xpos[env_ids] = _jp[env_ids]
 
     def reset(self):
         """Full reset -- all envs. Used once at the very start of training."""
