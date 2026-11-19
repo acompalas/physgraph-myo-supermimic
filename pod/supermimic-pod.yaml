@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: anderson-supermimic
+  namespace: ucsd-videoprocessing
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: physgraph
+        image: nvcr.io/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
+        command: ["sleep", "infinity"]
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "8"
+            memory: 32Gi
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "8"
+            memory: 32Gi
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+      - name: data
+        persistentVolumeClaim:
+          claimName: anderson-supermimic-data
+      tolerations:
+      - key: nautilus.io/reservation
+        operator: Equal
+        value: erl-ucsd
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-GeForce-RTX-3090
+                - NVIDIA-GeForce-RTX-4090
+                - NVIDIA-A10
+                - NVIDIA-A40
+                - NVIDIA-L40
+                - NVIDIA-L40S
+                - NVIDIA-RTX-A5000
+                - NVIDIA-RTX-A6000
+                - Tesla-V100-SXM2-32GB
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-PCIE-40GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-L4
+                - NVIDIA-TITAN-RTX
+                - Quadro-RTX-6000
+                - Quadro-RTX-8000
+                - NVIDIA-RTX-5000-Ada-Generation
+                - NVIDIA-H100-80GB-HBM3
+                - NVIDIA-H200-NVL
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - nrp-01.laccd.edu
+                - ry-gpu-02.sdsc.optiputer.net
